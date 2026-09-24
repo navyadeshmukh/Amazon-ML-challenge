@@ -1,0 +1,5 @@
+# OPTIONAL - only for --embedder e5small|e5base|bgem3|minilm. Pretrained weights are downloaded once from
+# the Hugging Face Hub (a model, not a data lookup). After installing, pin the exact versions:
+#   pip freeze | grep -i -E "^(torch|sentence-transformers|transformers)=="  and paste them below.
+sentence-transformers>=5.0     # Apache-2.0
+torch>=2.3                     # BSD-3

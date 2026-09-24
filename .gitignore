@@ -1,0 +1,20 @@
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Guides and reference notes
+TESTING_GUIDE.md
+*guide*.md
+*GUIDE*.md
+guides/
+Progress_and_Plan.md
+
+# Python cache & build files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+.DS_Store

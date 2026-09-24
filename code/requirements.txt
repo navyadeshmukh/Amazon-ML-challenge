@@ -1,0 +1,9 @@
+# Versions used for development/testing (Python 3.12). All MIT / BSD licensed.
+# No pretrained neural model is used in the default mode; final model = LightGBM gradient-boosted trees.
+lightgbm==4.7.0        # MIT
+rapidfuzz==3.14.6      # MIT
+scikit-learn==1.8.0    # BSD-3
+pandas==3.0.2          # BSD-3
+numpy==2.4.4           # BSD-3
+scipy==1.17.1          # BSD-3
+joblib>=1.4            # BSD-3  (parallel feature computation)
