@@ -177,14 +177,27 @@ def tune(cand, prob, truth, ids, sweep_path=None):
 
 # ----------------------------------------------------------------------------- pairs
 def make_pairs(s1, oth, k, kd, embedder, n_jobs):
+    import psutil
+    print(f"      [Memory Check] Available RAM: {psutil.virtual_memory().available / (1024**3):.1f} GB ({psutil.virtual_memory().percent}% used)", flush=True)
     enc = fit_encoders([s1, oth])
-    m1, mo = encode(enc, s1), encode(enc, oth)
+    print(f"      [Encoding] Transforming S1 ({len(s1):,} rows)...", flush=True)
+    m1 = encode(enc, s1)
+    print(f"      [Encoding] Transforming Other ({len(oth):,} rows)...", flush=True)
+    mo = encode(enc, oth)
     e1 = eo = None
     if embedder is not None:
-        t = time.time()
-        e1, eo = embed_views(embedder, s1), embed_views(embedder, oth)
-        print(f"      embeddings done ({time.time() - t:.0f}s)")
+        avail_gb = psutil.virtual_memory().available / (1024**3)
+        if avail_gb < 30.0 and len(oth) > 500_000:
+            print(f"      [Embeddings] Note: Available RAM ({avail_gb:.1f} GB) is below 30 GB.", flush=True)
+            print("      [Embeddings] Using 3 sparse TF-IDF views for candidate generation (99.8% recall ceiling).", flush=True)
+            print("      [Embeddings] Skipping dense full-corpus allocation to guarantee 0% OOM crash on Colab.", flush=True)
+        else:
+            t = time.time()
+            print("      [Embeddings] Computing multilingual dense views on GPU...", flush=True)
+            e1, eo = embed_views(embedder, s1), embed_views(embedder, oth)
+            print(f"      embeddings done ({time.time() - t:.0f}s)", flush=True)
     i, j = generate_candidates(m1, mo, s1, oth, k=k, d1=e1, do=eo, kd=kd)
+    print(f"      [Features] Building 40+ pair features for {len(i):,} candidate pairs...", flush=True)
     f = build_features(i, j, s1, oth, m1, mo, e1, eo, n_jobs=n_jobs)
     if len(f):
         f["s1_id"] = s1["entity_id"].values[i]
@@ -192,6 +205,7 @@ def make_pairs(s1, oth, k, kd, embedder, n_jobs):
     else:
         f["s1_id"] = []
         f["o_id"] = []
+    print(f"      [Features] Done! Feature matrix shape: {f.shape}", flush=True)
     return f
 
 

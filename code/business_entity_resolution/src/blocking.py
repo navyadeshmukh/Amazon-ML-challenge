@@ -9,12 +9,12 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 VIEWS = {
-    "name_char": ("name_n", dict(analyzer="char_wb", ngram_range=(2, 4), sublinear_tf=True, min_df=1)),
-    "name_word": ("name_n", dict(analyzer="word", ngram_range=(1, 2), sublinear_tf=True, min_df=1,
+    "name_char": ("name_n", dict(analyzer="char_wb", ngram_range=(2, 4), sublinear_tf=True, min_df=3, max_features=100000)),
+    "name_word": ("name_n", dict(analyzer="word", ngram_range=(1, 2), sublinear_tf=True, min_df=3, max_features=100000,
                                  token_pattern=r"(?u)\b\w+\b")),
-    "full_char": ("full_n", dict(analyzer="char_wb", ngram_range=(3, 4), sublinear_tf=True, min_df=1)),
-    "addr_char": ("addr_core", dict(analyzer="char_wb", ngram_range=(3, 4), sublinear_tf=True, min_df=1)),
-    "addr_word": ("addr_core", dict(analyzer="word", sublinear_tf=True, min_df=1,
+    "full_char": ("full_n", dict(analyzer="char_wb", ngram_range=(3, 4), sublinear_tf=True, min_df=4, max_features=120000)),
+    "addr_char": ("addr_core", dict(analyzer="char_wb", ngram_range=(3, 4), sublinear_tf=True, min_df=4, max_features=120000)),
+    "addr_word": ("addr_core", dict(analyzer="word", sublinear_tf=True, min_df=3, max_features=100000,
                                     token_pattern=r"(?u)\b\w+\b")),
 }
 BLOCK_VIEWS = ["name_char", "name_word", "full_char"]
@@ -22,17 +22,27 @@ DENSE_BLOCK_VIEWS = ["full", "name"]
 
 
 def fit_encoders(dfs):
-    """Fit TF-IDF on all records (unsupervised, no labels used)."""
+    """Fit TF-IDF on records using memory-capped vocabulary."""
     enc = {}
+    # Use representative corpus to learn vocabulary without duplicating memory
+    fit_texts = dfs[-1] if len(dfs) > 1 else dfs[0]
+    n_sample = min(len(fit_texts), 500_000)
+
     for name, (col, kw) in VIEWS.items():
+        print(f"      [TF-IDF] fitting {name} (sample={n_sample:,})...", flush=True)
         v = TfidfVectorizer(dtype=np.float32, **kw)
-        v.fit(np.concatenate([d[col].values for d in dfs]))
+        sample_vals = fit_texts[col].iloc[:n_sample].values
+        v.fit(sample_vals)
         enc[name] = v
     return enc
 
 
 def encode(enc, df):
-    return {name: enc[name].transform(df[VIEWS[name][0]].values) for name in VIEWS}
+    res = {}
+    for name in VIEWS:
+        col = VIEWS[name][0]
+        res[name] = enc[name].transform(df[col].values)
+    return res
 
 
 def _topk_sparse(A, B, ia, ib, k, chunk=1500):
@@ -89,10 +99,13 @@ def generate_candidates(m1, mo, s1, oth, k=25, d1=None, do=None, kd=15):
                     keys.update((i.astype(np.int64) * n_oth + j).tolist())
 
     for view in BLOCK_VIEWS:
+        print(f"      [Blocking] generating sparse candidates for {view} (k={k})...", flush=True)
         run("sparse", view, m1[view], mo[view], k)
-    if d1 is not None:
+    if d1 is not None and do is not None:
         for view in DENSE_BLOCK_VIEWS:
-            run("dense", view, d1[view], do[view], kd)
+            if view in d1 and view in do:
+                print(f"      [Blocking] generating dense candidates for {view} (kd={kd})...", flush=True)
+                run("dense", view, d1[view], do[view], kd)
     arr = np.fromiter(keys, dtype=np.int64, count=len(keys))
     arr.sort()
     return arr // n_oth, arr % n_oth
