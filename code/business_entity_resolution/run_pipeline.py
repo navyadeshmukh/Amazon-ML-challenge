@@ -5,8 +5,8 @@ data -> normalise -> blocking (recall) -> features -> LightGBM (grouped 5-fold O
      -> leave-one-country-out check -> test predictions -> matching_results.tsv + candidate_pairs.tsv
 
 Examples
-    python run_pipeline.py --quick                      # fast dev loop
-    python run_pipeline.py                              # strong TF-IDF + string features
+    python run_pipeline.py --quick                      # fast dev loop / sanity check
+    python run_pipeline.py                              # strong TF-IDF + string features (full)
     python run_pipeline.py --embedder e5small           # + multilingual embeddings (recommended)
     python run_pipeline.py --embedder bgem3 --device cuda --loco
 """
@@ -30,18 +30,79 @@ SEED = 42
 
 
 # ----------------------------------------------------------------------------- IO
-def read(path):
-    return pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+def read(path, nrows=None):
+    return pd.read_csv(path, sep="\t", nrows=nrows, dtype=str, keep_default_na=False)
 
 
-def load_split(d: Path, prefix: str):
-    s1, s2, s3 = (add_normalized(read(d / f"{prefix}_source{k}.tsv")) for k in (1, 2, 3))
-    s2["src"], s3["src"] = "S2", "S3"
-    return s1.reset_index(drop=True), pd.concat([s2, s3], ignore_index=True)
+def load_split(d: Path, prefix: str, sample_s1: int = 0, truth: dict = None):
+    """Load S1 and other sources (S2+S3).
+    If sample_s1 > 0: samples S1 aligned with ground truth for fast, high-quality validation.
+    If sample_s1 == 0: loads full dataset (production / AWS Builder run).
+    """
+    if sample_s1 > 0:
+        if truth is not None:
+            s1_targets = set(truth.keys())
+            s1_rows = []
+            for chunk in pd.read_csv(d / f"{prefix}_source1.tsv", sep="\t", chunksize=500_000, dtype=str, keep_default_na=False):
+                hit = chunk[chunk["entity_id"].isin(s1_targets)]
+                if len(hit):
+                    s1_rows.append(hit)
+                if sum(len(r) for r in s1_rows) >= len(s1_targets):
+                    break
+            s1 = add_normalized(pd.concat(s1_rows, ignore_index=True) if s1_rows else read(d / f"{prefix}_source1.tsv", nrows=sample_s1))
+        else:
+            s1 = add_normalized(read(d / f"{prefix}_source1.tsv", nrows=sample_s1))
+
+        s1_ids = set(s1["entity_id"])
+        target_ids = set()
+        if truth is not None:
+            for s1_id in s1_ids:
+                if s1_id in truth:
+                    target_ids.update(truth[s1_id])
+
+        noise_limit = min(5000, sample_s1 * 5)
+        s2_noise = read(d / f"{prefix}_source2.tsv", nrows=noise_limit)
+        s3_noise = read(d / f"{prefix}_source3.tsv", nrows=noise_limit)
+
+        s2_targets = {tid for tid in target_ids if tid.startswith("S2-")}
+        s3_targets = {tid for tid in target_ids if tid.startswith("S3-")}
+
+        s2_missing = s2_targets - set(s2_noise["entity_id"])
+        s3_missing = s3_targets - set(s3_noise["entity_id"])
+
+        s2_found, s3_found = [], []
+        if s2_missing:
+            for chunk in pd.read_csv(d / f"{prefix}_source2.tsv", sep="\t", chunksize=500_000, dtype=str, keep_default_na=False):
+                hits = chunk[chunk["entity_id"].isin(s2_missing)]
+                if len(hits):
+                    s2_found.append(hits)
+                    s2_missing -= set(hits["entity_id"])
+                    if not s2_missing:
+                        break
+        if s3_missing:
+            for chunk in pd.read_csv(d / f"{prefix}_source3.tsv", sep="\t", chunksize=500_000, dtype=str, keep_default_na=False):
+                hits = chunk[chunk["entity_id"].isin(s3_missing)]
+                if len(hits):
+                    s3_found.append(hits)
+                    s3_missing -= set(hits["entity_id"])
+                    if not s3_missing:
+                        break
+
+        s2 = pd.concat([s2_noise] + s2_found, ignore_index=True).drop_duplicates(subset=["entity_id"])
+        s3 = pd.concat([s3_noise] + s3_found, ignore_index=True).drop_duplicates(subset=["entity_id"])
+
+        s2 = add_normalized(s2)
+        s3 = add_normalized(s3)
+        s2["src"], s3["src"] = "S2", "S3"
+        return s1.reset_index(drop=True), pd.concat([s2, s3], ignore_index=True)
+    else:
+        s1, s2, s3 = (add_normalized(read(d / f"{prefix}_source{k}.tsv")) for k in (1, 2, 3))
+        s2["src"], s3["src"] = "S2", "S3"
+        return s1.reset_index(drop=True), pd.concat([s2, s3], ignore_index=True)
 
 
-def load_truth(path: Path):
-    gt = read(path)
+def load_truth(path: Path, nrows: int = None):
+    gt = read(path, nrows=nrows)
     return {a: {x.strip() for x in b.split(",") if x.strip()}
             for a, b in zip(gt["source1_entity_id"], gt["matched_entity_ids"])}
 
@@ -89,6 +150,8 @@ def fmt(m):
 # ----------------------------------------------------------------------------- decoding
 def decode(cand, prob, thr, exclusive):
     """exclusive=True: each S2/S3 record only goes to its highest-probability S1 (S1 is deduplicated)."""
+    if len(cand) == 0:
+        return {}
     d = cand[["s1_id", "o_id"]].assign(p=prob)
     d = d[d["p"] >= thr]
     if exclusive and len(d):
@@ -123,8 +186,12 @@ def make_pairs(s1, oth, k, kd, embedder, n_jobs):
         print(f"      embeddings done ({time.time() - t:.0f}s)")
     i, j = generate_candidates(m1, mo, s1, oth, k=k, d1=e1, do=eo, kd=kd)
     f = build_features(i, j, s1, oth, m1, mo, e1, eo, n_jobs=n_jobs)
-    f["s1_id"] = s1["entity_id"].values[i]
-    f["o_id"] = oth["entity_id"].values[j]
+    if len(f):
+        f["s1_id"] = s1["entity_id"].values[i]
+        f["o_id"] = oth["entity_id"].values[j]
+    else:
+        f["s1_id"] = []
+        f["o_id"] = []
     return f
 
 
@@ -152,14 +219,21 @@ def error_report(pm, truth, tr1, tro, cand, prob, path: Path, n=300):
 
 
 def write_outputs(cand, matches, s1_ids, out_dir: Path):
+    """Write candidate_pairs.tsv and matching_results.tsv cleanly in submission format."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmap = cand.groupby("s1_id")["o_id"].apply(lambda s: ",".join(sorted(set(s)))).to_dict()
-    pd.DataFrame({"source1_entity_id": s1_ids,
-                  "candidate_entity_ids": [cmap.get(s, "") for s in s1_ids]}
-                 ).to_csv(out_dir / "candidate_pairs.tsv", sep="\t", index=False)
-    pd.DataFrame({"source1_entity_id": s1_ids,
-                  "matched_entity_ids": [",".join(sorted(matches.get(s, set()))) for s in s1_ids]}
-                 ).to_csv(out_dir / "matching_results.tsv", sep="\t", index=False)
+    cmap = cand.groupby("s1_id")["o_id"].apply(lambda s: ",".join(sorted(set(s)))).to_dict() if len(cand) else {}
+
+    with open(out_dir / "candidate_pairs.tsv", "w", encoding="utf-8") as f:
+        f.write("source1_entity_id\tcandidate_entity_ids\n")
+        for s in s1_ids:
+            f.write(f"{s}\t{cmap.get(s, '')}\n")
+
+    with open(out_dir / "matching_results.tsv", "w", encoding="utf-8") as f:
+        f.write("source1_entity_id\tmatched_entity_ids\n")
+        for s in s1_ids:
+            m = matches.get(s, set())
+            m_str = ",".join(sorted(m)) if m else ""
+            f.write(f"{s}\t{m_str}\n")
 
 
 # ----------------------------------------------------------------------------- main
@@ -175,12 +249,16 @@ def main():
     ap.add_argument("--device", default=None, help="cpu | cuda (default: auto)")
     ap.add_argument("--n-jobs", type=int, default=-1)
     ap.add_argument("--loco", action="store_true", help="leave-one-country-out generalisation check")
-    ap.add_argument("--quick", action="store_true", help="k=15, folds=3 (fast dev loop)")
+    ap.add_argument("--quick", action="store_true", help="k=15, folds=3, sample_s1=1000 (fast dev loop / sanity check)")
+    ap.add_argument("--sample-s1", type=int, default=0,
+                    help="sample N Source-1 entities for fast sanity checking (0 = full data)")
     ap.add_argument("--min-thr-safety", type=float, default=0.0,
                     help="added to the tuned threshold at test time (extra precision for unseen France)")
     a = ap.parse_args()
     if a.quick:
         a.k, a.folds = 15, 3
+        if a.sample_s1 == 0:
+            a.sample_s1 = 1000
     data, out, rep = Path(a.data_root), Path(a.out_root), Path(a.report_dir)
     rep.mkdir(parents=True, exist_ok=True)
     metrics, t0 = {"args": vars(a)}, time.time()
@@ -188,8 +266,8 @@ def main():
 
     # ---------------- TRAIN
     print("[1/7] load + normalise train")
-    tr1, tro = load_split(data / "train", "train")
-    truth = load_truth(data / "train" / "train_ground_truth.tsv")
+    truth = load_truth(data / "train" / "train_ground_truth.tsv", nrows=a.sample_s1 if a.sample_s1 > 0 else None)
+    tr1, tro = load_split(data / "train", "train", sample_s1=a.sample_s1, truth=truth)
     print(f"      S1={len(tr1)} S2+S3={len(tro)} countries={sorted(tr1.country_n.unique())}")
 
     print("[2/7] blocking + features (train)")
@@ -214,12 +292,20 @@ def main():
     print(f"[3/7] {a.folds}-fold LightGBM grouped by S1 entity")
     oof, models = np.zeros(len(tr)), []
     for f, (ta, va) in enumerate(GroupKFold(a.folds).split(X, y, groups)):
+        if len(np.unique(y[ta])) < 2:
+            print(f"      fold {f}: skipped (only 1 class in training fold)")
+            continue
         m = lgb.LGBMClassifier(**params)
         m.fit(X[ta], y[ta], eval_set=[(X[va], y[va])], eval_metric="binary_logloss",
               callbacks=[lgb.early_stopping(100, verbose=False)])
         oof[va] = m.predict_proba(X[va])[:, 1]
         models.append(m)
         print(f"      fold {f}: best_iter={m.best_iteration_}")
+
+    if not models:
+        print("      fallback: training single model on all training data")
+        m = lgb.LGBMClassifier(**params).fit(X, y)
+        models.append(m)
 
     print("[4/7] validation on OOF (leaderboard metric = macro F0.5, singletons included)")
     ids = tr1["entity_id"].tolist()
@@ -246,6 +332,8 @@ def main():
         loco = {}
         for c in sorted(tr1.country_n.unique()):
             trn, tst = cty != c, cty == c
+            if len(np.unique(y[trn])) < 2 or np.sum(tst) == 0:
+                continue
             p2 = dict(params, n_estimators=400)
             m = lgb.LGBMClassifier(**p2).fit(X[trn], y[trn])
             pr = m.predict_proba(X[tst])[:, 1]
@@ -260,20 +348,31 @@ def main():
 
     # ---------------- TEST
     print("[6/7] test: normalise, block, featurise")
-    te1, teo = load_split(data / "test", "test")
-    print(f"      S1={len(te1)} S2+S3={len(teo)} countries={sorted(te1.country_n.unique())}")
+    if a.sample_s1 > 0:
+        te1, teo = load_split(data / "test", "test", sample_s1=a.sample_s1)
+        all_test_s1_ids = []
+        with open(data / "test" / "test_source1.tsv", "r", encoding="utf-8") as f:
+            next(f)
+            for line in f:
+                if line.strip():
+                    all_test_s1_ids.append(line.split("\t", 1)[0].strip())
+    else:
+        te1, teo = load_split(data / "test", "test")
+        all_test_s1_ids = te1["entity_id"].tolist()
+
+    print(f"      S1={len(te1)} (eval) / {len(all_test_s1_ids)} (total) S2+S3={len(teo)} countries={sorted(te1.country_n.unique())}")
     te = make_pairs(te1, teo, a.k, a.kd, embedder, a.n_jobs)
-    print(f"      candidates={len(te):,} avg cands/S1={len(te)/len(te1):.1f}")
+    print(f"      candidates={len(te):,} avg cands/S1={len(te)/max(1, len(te1)):.1f}")
 
     print("[7/7] predict + write")
-    p = np.mean([m.predict_proba(te[feat_cols].values)[:, 1] for m in models], axis=0)
+    p = np.mean([m.predict_proba(te[feat_cols].values)[:, 1] for m in models], axis=0) if len(te) else np.zeros(0)
     matches = decode(te, p, min(0.99, thr + a.min_thr_safety), excl)
-    write_outputs(te, matches, te1["entity_id"].tolist(), out)
+    write_outputs(te, matches, all_test_s1_ids, out)
     n_match = sum(1 for v in matches.values() if v)
-    metrics.update(test_s1=len(te1), test_candidates=len(te), test_s1_with_match=n_match,
-                   test_countries=sorted(te1.country_n.unique()))
+    metrics.update(test_s1=len(all_test_s1_ids), test_evaluated_s1=len(te1), test_candidates=len(te),
+                   test_s1_with_match=n_match, test_countries=sorted(te1.country_n.unique()))
     (rep / "metrics.json").write_text(json.dumps(metrics, indent=2, default=str))
-    print(f"      S1 with >=1 match: {n_match}/{len(te1)} -> {out}")
+    print(f"      S1 with >=1 match: {n_match}/{len(all_test_s1_ids)} -> {out}")
     print(f"done in {(time.time()-t0)/60:.1f} min | next: python utils/validate_submission.py --matching "
           f"{out}/matching_results.tsv --candidate {out}/candidate_pairs.tsv --test-dir {data}/test")
 

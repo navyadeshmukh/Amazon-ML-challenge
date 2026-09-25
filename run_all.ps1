@@ -1,5 +1,5 @@
 # Full workflow for Team Slytherin - run from Amazon-ML-challenge/
-param([string]$Team = "Slytherin")
+param([string]$Team = "Slytherine")
 $ErrorActionPreference = "Stop"
 $STUDENT = "..\student_resource"
 

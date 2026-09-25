@@ -1,4 +1,4 @@
-# Business Entity Resolution — Team Slytherin
+# Business Entity Resolution — Team Slytherine
 
 Pipeline: normalise → blocking (TF-IDF top-K + optional dense embeddings, per country, per source) → pair features
 → LightGBM (5-fold grouped OOF) → F0.5 threshold + exclusive-assignment tuning → outputs.
@@ -43,7 +43,7 @@ Writes `output/matching_results.tsv` and `output/candidate_pairs.tsv`, plus
 | `--folds 5` | Number of CV folds (default: 5) |
 | `--n-jobs -1` | Parallel feature workers (default: all cores) |
 
-`./run_all.ps1 -Team Slytherin` runs the whole recommended workflow on Windows.
+`./run_all.ps1 -Team Slytherine` runs the whole recommended workflow on Windows.
 
 ## Validate Before Uploading
 ```bash
@@ -71,7 +71,7 @@ Seeds are fixed (`SEED=42`). No external data / APIs are used.
 ## Build the Submission Zip
 ```bash
 cd code/business_entity_resolution
-python src/make_submission_zip.py --team Slytherin
+python src/make_submission_zip.py --team Slytherine
 ```
 
 ## Reports Generated

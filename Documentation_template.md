@@ -1,6 +1,6 @@
 # ML Challenge 2026: Business Entity Resolution Solution Template
 
-**Team Name:** Slytherin  
+**Team Name:** Slytherine  
 **Team Members:** TODO  
 **Submission Date:** TODO
 

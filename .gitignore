@@ -4,6 +4,12 @@ venv/
 env/
 ENV/
 
+# Large output & report files
+output/
+reports/
+*.zip
+*.tar.gz
+
 # Guides and reference notes
 TESTING_GUIDE.md
 *guide*.md
