@@ -70,9 +70,10 @@ def _string_feats(n1, n2, nc1, nc2, a1, a2, af1, af2, p1, p2):
 def build_features(i, j, s1, oth, m1, mo, e1=None, eo=None, n_jobs=-1):
     f = pd.DataFrame({"i": i, "j": j})
     f["is_s3"] = (oth["src"].values[j] == "S3").astype(np.int8)
-    for v in m1:
-        f[f"cos_{v}"] = _rowcos(m1[v], mo[v], i, j)
-    if e1 is not None:
+    if m1 is not None and mo is not None:
+        for v in m1:
+            f[f"cos_{v}"] = _rowcos(m1[v], mo[v], i, j)
+    if e1 is not None and eo is not None:
         for v in e1:
             f[f"emb_{v}"] = _rowdot(e1[v], eo[v], i, j)
 
@@ -88,7 +89,10 @@ def build_features(i, j, s1, oth, m1, mo, e1=None, eo=None, n_jobs=-1):
     f["country_match"] = (s1["country_n"].values[i] == oth["country_n"].values[j]).astype(np.int8)
 
     # ---- combined score + competition features (precision lever)
-    f["combo"] = 0.65 * f["cos_name_char"] + 0.35 * f["cos_addr_char"]
+    if "cos_name_char" in f.columns and "cos_addr_char" in f.columns:
+        f["combo"] = 0.65 * f["cos_name_char"] + 0.35 * f["cos_addr_char"]
+    else:
+        f["combo"] = 0.65 * f["n_jw"] + 0.35 * f["a_lev"]
     g = f.groupby("i")["combo"]
     f["rank_i"] = g.rank(ascending=False, method="min")
     f["gap_i"] = f["combo"] - g.transform("max")

@@ -21,7 +21,7 @@ import pandas as pd
 from sklearn.model_selection import GroupKFold
 
 from src.normalize import add_normalized
-from src.blocking import fit_encoders, encode, generate_candidates
+from src.blocking import fit_encoders, encode, generate_candidates, generate_candidates_streaming
 from src.features import build_features
 from src.embeddings import load_embedder, embed_views
 
@@ -93,12 +93,26 @@ def load_split(d: Path, prefix: str, sample_s1: int = 0, truth: dict = None):
 
         s2 = add_normalized(s2)
         s3 = add_normalized(s3)
+        for c in ("business_name", "business_address", "country"):
+            for df_obj in (s1, s2, s3):
+                if c in df_obj.columns: del df_obj[c]
         s2["src"], s3["src"] = "S2", "S3"
         return s1.reset_index(drop=True), pd.concat([s2, s3], ignore_index=True)
     else:
-        s1, s2, s3 = (add_normalized(read(d / f"{prefix}_source{k}.tsv")) for k in (1, 2, 3))
-        s2["src"], s3["src"] = "S2", "S3"
-        return s1.reset_index(drop=True), pd.concat([s2, s3], ignore_index=True)
+        dfs = []
+        for k in (1, 2, 3):
+            df = add_normalized(read(d / f"{prefix}_source{k}.tsv"))
+            for c in ("business_name", "business_address", "country"):
+                if c in df.columns: del df[c]
+            if k == 2: df["src"] = "S2"
+            elif k == 3: df["src"] = "S3"
+            dfs.append(df)
+        s1 = dfs[0].reset_index(drop=True)
+        oth = pd.concat([dfs[1], dfs[2]], ignore_index=True)
+        del dfs
+        import gc
+        gc.collect()
+        return s1, oth
 
 
 def load_truth(path: Path, nrows: int = None):
@@ -177,42 +191,35 @@ def tune(cand, prob, truth, ids, sweep_path=None):
 
 # ----------------------------------------------------------------------------- pairs
 def make_pairs(s1, oth, k, kd, embedder, n_jobs):
-    import psutil
-    print(f"      [Memory Check] Available RAM: {psutil.virtual_memory().available / (1024**3):.1f} GB ({psutil.virtual_memory().percent}% used)", flush=True)
-    enc = fit_encoders([s1, oth])
-    print(f"      [Encoding] Transforming S1 ({len(s1):,} rows)...", flush=True)
-    m1 = encode(enc, s1)
-    print(f"      [Encoding] Transforming Other ({len(oth):,} rows)...", flush=True)
-    mo = encode(enc, oth)
-    e1 = eo = None
-    if embedder is not None:
-        avail_gb = psutil.virtual_memory().available / (1024**3)
-        if avail_gb < 30.0 and len(oth) > 500_000:
-            print(f"      [Embeddings] Note: Available RAM ({avail_gb:.1f} GB) is below 30 GB.", flush=True)
-            print("      [Embeddings] Using 3 sparse TF-IDF views for candidate generation (99.8% recall ceiling).", flush=True)
-            print("      [Embeddings] Skipping dense full-corpus allocation to guarantee 0% OOM crash on Colab.", flush=True)
-        else:
-            t = time.time()
-            print("      [Embeddings] Computing multilingual dense views on GPU...", flush=True)
-            e1, eo = embed_views(embedder, s1), embed_views(embedder, oth)
-            print(f"      embeddings done ({time.time() - t:.0f}s)", flush=True)
-    i, j = generate_candidates(m1, mo, s1, oth, k=k, d1=e1, do=eo, kd=kd)
-    print(f"      [Features] Building 40+ pair features for {len(i):,} candidate pairs...", flush=True)
-    f = build_features(i, j, s1, oth, m1, mo, e1, eo, n_jobs=n_jobs)
+    import psutil, gc
+    avail_gb = psutil.virtual_memory().available / (1024**3)
+    print(f"      [Memory Check] Available RAM: {avail_gb:.1f} GB ({psutil.virtual_memory().percent}% used)", flush=True)
+
+    print(f"      [Blocking] Streaming multi-view candidate generation (k={k})...", flush=True)
+    i, j = generate_candidates_streaming(s1, oth, k=k)
+    avail_gb = psutil.virtual_memory().available / (1024**3)
+    print(f"      [Blocking] Generated {len(i):,} unique candidate pairs. (Available RAM: {avail_gb:.1f} GB)", flush=True)
+
+    print(f"      [Features] Building 35+ pair features for {len(i):,} candidates in parallel...", flush=True)
+    f = build_features(i, j, s1, oth, m1=None, mo=None, e1=None, eo=None, n_jobs=n_jobs)
     if len(f):
         f["s1_id"] = s1["entity_id"].values[i]
         f["o_id"] = oth["entity_id"].values[j]
     else:
         f["s1_id"] = []
         f["o_id"] = []
-    print(f"      [Features] Done! Feature matrix shape: {f.shape}", flush=True)
+    avail_gb = psutil.virtual_memory().available / (1024**3)
+    print(f"      [Features] Done! Feature matrix shape: {f.shape} (Available RAM: {avail_gb:.1f} GB)", flush=True)
     return f
 
 
 def error_report(pm, truth, tr1, tro, cand, prob, path: Path, n=300):
     info = {}
     for df in (tr1, tro):
-        for e, nm, ad, c in zip(df["entity_id"], df["business_name"], df["business_address"], df["country"]):
+        name_col = "name_n" if "name_n" in df.columns else "business_name"
+        addr_col = "addr_core" if "addr_core" in df.columns else "business_address"
+        c_col = "country_n" if "country_n" in df.columns else "country"
+        for e, nm, ad, c in zip(df["entity_id"], df[name_col], df[addr_col], df[c_col]):
             info[e] = (nm, ad, c)
     pmap = dict(zip(zip(cand["s1_id"], cand["o_id"]), prob))
     rows = []

@@ -109,3 +109,50 @@ def generate_candidates(m1, mo, s1, oth, k=25, d1=None, do=None, kd=15):
     arr = np.fromiter(keys, dtype=np.int64, count=len(keys))
     arr.sort()
     return arr // n_oth, arr % n_oth
+
+
+def generate_candidates_streaming(s1, oth, k=25):
+    """Generate candidates one view at a time to minimize memory footprint."""
+    import gc, psutil
+    n_oth = len(oth)
+    c1, co, src = s1["country_n"].values, oth["country_n"].values, oth["src"].values
+    keys = set()
+
+    for view_name in BLOCK_VIEWS:
+        col, kw = VIEWS[view_name]
+        avail_gb = psutil.virtual_memory().available / (1024**3)
+        print(f"      [View: {view_name}] Fitting TF-IDF (Available RAM: {avail_gb:.1f} GB)...", flush=True)
+        v = TfidfVectorizer(dtype=np.float32, **kw)
+        n_sample = min(len(oth), 400_000)
+        v.fit(oth[col].iloc[:n_sample].values)
+
+        print(f"      [View: {view_name}] Transforming S1 ({len(s1):,} rows)...", flush=True)
+        A = v.transform(s1[col].values)
+
+        print(f"      [View: {view_name}] Transforming Other ({len(oth):,} rows)...", flush=True)
+        B = v.transform(oth[col].values)
+
+        print(f"      [View: {view_name}] Running Top-{k} search...", flush=True)
+        for sname in ("S2", "S3"):
+            idx_src = np.where(src == sname)[0]
+            if len(idx_src) == 0:
+                continue
+            for c in np.unique(c1):
+                ia = np.where(c1 == c)[0]
+                ib = idx_src[co[idx_src] == c]
+                if len(ib) == 0:
+                    ib = idx_src
+                oi, oj = _topk_sparse(A, B, ia, ib, k)
+                if oi:
+                    i, j = np.concatenate(oi), np.concatenate(oj)
+                    keys.update((i.astype(np.int64) * n_oth + j).tolist())
+
+        del A, B, v
+        gc.collect()
+        avail_gb = psutil.virtual_memory().available / (1024**3)
+        print(f"      [View: {view_name}] Done! Total candidates so far: {len(keys):,} (Available RAM: {avail_gb:.1f} GB)", flush=True)
+
+    arr = np.fromiter(keys, dtype=np.int64, count=len(keys))
+    arr.sort()
+    return arr // n_oth, arr % n_oth
+
