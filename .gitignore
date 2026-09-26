@@ -7,6 +7,7 @@ ENV/
 # Large output & report files
 output/
 reports/
+models/
 *.zip
 *.tar.gz
 

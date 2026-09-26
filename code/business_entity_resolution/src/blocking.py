@@ -129,10 +129,7 @@ def generate_candidates_streaming(s1, oth, k=25):
         print(f"      [View: {view_name}] Transforming S1 ({len(s1):,} rows)...", flush=True)
         A = v.transform(s1[col].values)
 
-        print(f"      [View: {view_name}] Transforming Other ({len(oth):,} rows)...", flush=True)
-        B = v.transform(oth[col].values)
-
-        print(f"      [View: {view_name}] Running Top-{k} search...", flush=True)
+        print(f"      [View: {view_name}] Partitioned search across Sources and Countries...", flush=True)
         for sname in ("S2", "S3"):
             idx_src = np.where(src == sname)[0]
             if len(idx_src) == 0:
@@ -142,12 +139,31 @@ def generate_candidates_streaming(s1, oth, k=25):
                 ib = idx_src[co[idx_src] == c]
                 if len(ib) == 0:
                     ib = idx_src
-                oi, oj = _topk_sparse(A, B, ia, ib, k)
-                if oi:
-                    i, j = np.concatenate(oi), np.concatenate(oj)
-                    keys.update((i.astype(np.int64) * n_oth + j).tolist())
+                if len(ia) == 0 or len(ib) == 0:
+                    continue
 
-        del A, B, v
+                avail_ram = psutil.virtual_memory().available / (1024**3)
+                print(f"         Searching {sname} - {c} (S1: {len(ia):,}, Other: {len(ib):,}, RAM: {avail_ram:.1f} GB free)...", flush=True)
+                B_sub = v.transform(oth[col].iloc[ib].values)
+                BT = B_sub.T.tocsc()
+
+                chunk = 1500
+                for st in range(0, len(ia), chunk):
+                    rows = ia[st:st + chunk]
+                    S = (A[rows] @ BT).tocsr()
+                    for r in range(S.shape[0]):
+                        lo, hi = S.indptr[r], S.indptr[r + 1]
+                        if hi == lo:
+                            continue
+                        d, ix = S.data[lo:hi], S.indices[lo:hi]
+                        if len(d) > k:
+                            ix = ix[np.argpartition(-d, k)[:k]]
+                        keys.update((rows[r].astype(np.int64) * n_oth + ib[ix]).tolist())
+
+                del B_sub, BT
+                gc.collect()
+
+        del A, v
         gc.collect()
         avail_gb = psutil.virtual_memory().available / (1024**3)
         print(f"      [View: {view_name}] Done! Total candidates so far: {len(keys):,} (Available RAM: {avail_gb:.1f} GB)", flush=True)

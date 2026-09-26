@@ -347,6 +347,24 @@ def main():
     print("      top features:", ", ".join(imp.sort_values(ascending=False).head(10).index))
     print("      errors:", metrics["error_counts"], "->", rep / "oof_errors.tsv", "| sweep ->", rep / "threshold_sweep.tsv")
 
+    # Save trained models and decision parameters to disk
+    model_dir = out.parent / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    import pickle
+    model_artifacts = {
+        "models": models,
+        "feat_cols": feat_cols,
+        "threshold": thr,
+        "exclusive": excl,
+        "score_oof": score,
+        "config": vars(a)
+    }
+    with open(model_dir / "model_artifacts.pkl", "wb") as mf:
+        pickle.dump(model_artifacts, mf)
+    for f_idx, m_obj in enumerate(models):
+        m_obj.booster_.save_model(str(model_dir / f"lightgbm_fold_{f_idx}.txt"))
+    print(f"      [Model Export] Saved {len(models)} fold models and artifacts -> {model_dir}/model_artifacts.pkl", flush=True)
+
     if a.loco and tr1.country_n.nunique() > 1:
         print("[5/7] leave-one-country-out (simulates unseen France): train on other countries, test on held-out")
         cty = tr1["country_n"].values[tr["i"].values]
