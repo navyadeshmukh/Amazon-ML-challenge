@@ -21,7 +21,7 @@ import pandas as pd
 from sklearn.model_selection import GroupKFold
 
 from src.normalize import add_normalized
-from src.blocking import fit_encoders, encode, generate_candidates, generate_candidates_streaming
+from src.blocking import generate_candidates_streaming
 from src.features import build_features
 from src.embeddings import load_embedder, embed_views
 
